@@ -35,10 +35,10 @@ plt.rcParams['axes.unicode_minus'] = False
 # ==========================================
 WOMEN_SIXES_TOP_SPEED = 5.5      
 WOMEN_SIXES_AVG_SPEED = 74.0      
-WOMEN_SIXES_SPRINT_DIST = 3.6    # 對標 Zone 4 Distance
+WOMEN_SIXES_SPRINT_DIST = 3.6    
 
 WOMEN_SIXES_BASELINES = {
-    'World Class Sixes (Women)': {
+    'World Class Sixes': {
         'dist': 2412, 
         'avg_spd': WOMEN_SIXES_AVG_SPEED, 
         'top_spd': WOMEN_SIXES_TOP_SPEED, 
@@ -66,6 +66,22 @@ def get_img_buffer(fig):
     buf.seek(0)
     return buf
 
+# ==========================================
+# 🌟 新增：基準動態調節器 (Quarter vs Full Game)
+# ==========================================
+def get_dynamic_baseline(session_name):
+    b = default_baseline_data.copy()
+    s_upper = str(session_name).upper()
+    
+    # 判斷是否為單節 (包含 Q1~Q4、Quarter，或是以數字結尾且不包含 Total)
+    is_quarter = any(q in s_upper for q in ['Q1', 'Q2', 'Q3', 'Q4', 'QUARTER']) or (s_upper.split()[-1].isdigit() and 'TOTAL' not in s_upper)
+    
+    if is_quarter:
+        b['dist'] = b['dist'] / 4
+        b['sprint_dist'] = b['sprint_dist'] / 4
+        
+    return b, is_quarter
+
 st.set_page_config(page_title="女網六人制 GPS 數據儀表板", layout="wide")
 
 @st.cache_data
@@ -74,15 +90,24 @@ def load_data(file_path):
         return pd.read_csv(file_path)
     return None
 
-# 讀取新的六人制資料表 (您可以根據實際檔名修改)
 df = load_data('Cleaned_GPS_Data_Women.csv')
 
 if df is None:
     st.error("❌ 找不到資料！請確認 Cleaned_GPS_Data_Women.csv 是否存在。")
 else:
-    # 🌟 關鍵轉換：將 Zone 4 Distance 轉換為 Sprint Distance
-    if 'Zone 4 Distance (m)' in df.columns: 
-        df.rename(columns={'Zone 4 Distance (m)': 'Sprint Distance (m)'}, inplace=True)
+    # 🌟 智慧欄位映射
+    rename_mapping = {}
+    for col in df.columns:
+        if 'Zone 4 Distance' in str(col):
+            rename_mapping[col] = 'Sprint Distance (m)'
+            
+    if rename_mapping:
+        df.rename(columns=rename_mapping, inplace=True)
+        
+    if 'Sprint Distance (m)' not in df.columns:
+        st.error("❌ 嚴重錯誤：CSV 資料表中找不到包含 'Zone 4 Distance' 的欄位！")
+        st.info(f"💡 你的 CSV 檔案目前擁有的欄位包含：\n{', '.join(df.columns.tolist())}")
+        st.stop()
     
     df = df[~df['Player'].astype(str).str.contains('#')]
     df['Date'] = df['Session'].astype(str).apply(lambda x: x.split()[0])
@@ -94,16 +119,18 @@ else:
             return 0
     df['Month'] = df['Date'].apply(get_month)
 
+    # 聚合引擎
     def generate_agg_df(subset_df, period_name):
         daily_totals = subset_df[subset_df['Session'].astype(str).str.contains('Total|total', case=False, na=False)]
         if daily_totals.empty:
             daily_totals = subset_df
             
+        # 🌟 關鍵修改：將距離改為 'mean'，算出該週期的「場均表現」，以便與 3.6m 對標
         agg_funcs = {
-            'Total Distance (m)': 'sum',
+            'Total Distance (m)': 'mean',
             'Avg Speed (m/min)': 'mean',
             'Top Speed (m/s)': 'max',
-            'Sprint Distance (m)': 'sum' # 🌟 Sprint 是距離，聚合時使用加總
+            'Sprint Distance (m)': 'mean'
         }
         if 'RPE' in daily_totals.columns: agg_funcs['RPE'] = 'mean'
         if 'Position' in daily_totals.columns: agg_funcs['Position'] = 'first'
@@ -113,8 +140,9 @@ else:
         if 'RPE' in agg.columns:
             agg['RPE'] = agg['RPE'].round(1)
             
+        # 保留 Total 字眼以供辨識，但加上 (場均) 提示教練
         agg['Date'] = period_name
-        agg['Session'] = period_name + ' Total'
+        agg['Session'] = period_name + ' Total' 
         return agg
 
     agg_dfs = []
@@ -131,13 +159,14 @@ else:
     if 'custom_periods' not in st.session_state:
         st.session_state['custom_periods'] = {}
 
-    st.sidebar.title("🥍 女網六人制 戰情室導覽")
+    st.sidebar.title("🥍 女網六人制 戰情室")
     st.sidebar.markdown("### 🔄 建立專屬盃賽/週期")
     raw_dates = [d for d in df['Date'].unique() if '/' in str(d)]
     
     with st.sidebar.expander("🛠️ 點此展開盃賽融合器"):
         new_cycle_name = st.text_input("週期名稱 (例: 世界運動會):")
         selected_cycle_dates = st.multiselect("選擇要融合的日期:", raw_dates)
+        st.caption("💡 註：融合後的距離數據將以「場均」呈現，方便直接對標六人制基準。")
         if st.button("➕ 建立專屬週期資料"):
             if new_cycle_name and selected_cycle_dates:
                 st.session_state['custom_periods'][new_cycle_name] = selected_cycle_dates
@@ -177,23 +206,28 @@ else:
         sessions_for_date = df[df['Date'] == selected_date]['Session'].unique().tolist()
         selected_session = st.sidebar.selectbox("⏱️ 第二步：選擇時段", sessions_for_date, key='team_session')
         
+        # 🌟 啟動基準動態調節器
+        baseline_data, is_quarter = get_dynamic_baseline(selected_session)
+        baseline_label = default_baseline_name + (" (單節標準)" if is_quarter else " (整場標準)")
+        
         st.write("---")
         df_filtered = df[df['Session'] == selected_session]
         
         if not df_filtered.empty:
-            # 🌟 聚合加入 Sprint Distance
             agg_dict = {'Total Distance (m)': 'max', 'Avg Speed (m/min)': 'mean', 'Top Speed (m/s)': 'max', 'Sprint Distance (m)': 'max'}
             if 'RPE' in df_filtered.columns: agg_dict['RPE'] = 'max'
             if 'Position' in df_filtered.columns: agg_dict['Position'] = 'first'
             
             df_plot = df_filtered.groupby('Player').agg(agg_dict).reset_index()
 
-            st.subheader(f"1️⃣ {selected_session} 外部與內部負荷")
+            title_suffix = " (週期場均表現)" if "Total" in selected_session and selected_date in custom_and_auto_names else ""
+            st.subheader(f"1️⃣ {selected_session} 外部與內部負荷{title_suffix}")
+            
             fig1, ax1 = plt.subplots(figsize=(12, 3.5))
             bars1 = ax1.bar(df_plot['Player'], df_plot['Total Distance (m)'], color='#e06666', width=0.5)
             
-            # 對標六人制數據
-            ax1.axhline(y=default_baseline_data['dist'], color='gold', linestyle='-', linewidth=2, label=default_baseline_name)
+            # 使用動態縮放後的基準線
+            ax1.axhline(y=baseline_data['dist'], color='gold', linestyle='-', linewidth=2, label=baseline_label)
             
             team_avg_dist = df_plot['Total Distance (m)'].mean()
             if pd.notna(team_avg_dist):
@@ -202,27 +236,31 @@ else:
             for bar in bars1:
                 yval = bar.get_height()
                 if pd.notna(yval) and yval > 0:
-                    ax1.text(bar.get_x() + bar.get_width()/2, yval/2 + 200, int(yval), ha='center', va='center', color='white', fontweight='bold', fontsize=12)
+                    ax1.text(bar.get_x() + bar.get_width()/2, yval/2 + (200 if not is_quarter else 50), int(yval), ha='center', va='center', color='white', fontweight='bold', fontsize=12)
                     if 'RPE' in df_plot.columns:
                         rpe_val = df_plot.loc[df_plot['Total Distance (m)'] == yval, 'RPE'].values[0]
                         if pd.notna(rpe_val) and rpe_val > 0:
-                            ax1.text(bar.get_x() + bar.get_width()/2, yval/2 - 200, f"RPE: {rpe_val}", ha='center', va='center', color='#ffd966', fontweight='bold', fontsize=11)
+                            ax1.text(bar.get_x() + bar.get_width()/2, yval/2 - (200 if not is_quarter else 50), f"RPE: {rpe_val}", ha='center', va='center', color='#ffd966', fontweight='bold', fontsize=11)
             
             ax1.margins(x=0.05)
-            ax1.set_ylim(0, get_dist_ymax(df_plot['Total Distance (m)'].max()))
+            
+            y_max_dist = get_dist_ymax(df_plot['Total Distance (m)'].max())
+            if is_quarter: y_max_dist = max(1000, (int(df_plot['Total Distance (m)'].max()) // 500 + 1) * 500)
+            ax1.set_ylim(0, y_max_dist)
+            
             ax1.legend()
             st.pyplot(fig1)
             st.download_button(label="📥 下載圖表 (外部與內部負荷)", data=get_img_buffer(fig1), file_name=f"Total_Distance_{selected_session}.png", mime="image/png")
 
             col1, col2 = st.columns(2)
             with col1:
-                st.subheader("2️⃣ 平均速度表現 (vs. Sixes Benchmark)")
+                st.subheader(f"2️⃣ 平均速度表現 (vs. Sixes Avg)")
                 spd_mode = st.radio("顯示模式：", ["📌 當前時段", "📅 多日比較 (最多5天)"], horizontal=True, key='spd_mode')
                 
                 if spd_mode == "📌 當前時段":
                     fig2, ax2 = plt.subplots(figsize=(6, 4))
                     bars2 = ax2.bar(df_plot['Player'], df_plot['Avg Speed (m/min)'], color='#c27ba0', width=0.5)
-                    ax2.axhline(y=default_baseline_data['avg_spd'], color='gold', linestyle='-', linewidth=2, label=default_baseline_name)
+                    ax2.axhline(y=baseline_data['avg_spd'], color='gold', linestyle='-', linewidth=2, label=baseline_label)
                     
                     team_avg_spd = df_plot['Avg Speed (m/min)'].mean()
                     if pd.notna(team_avg_spd):
@@ -230,7 +268,7 @@ else:
                     
                     ax2.margins(x=0.1)
                     max_spd = df_plot['Avg Speed (m/min)'].max()
-                    max_spd = max(max_spd, default_baseline_data['avg_spd']) if pd.notna(max_spd) else default_baseline_data['avg_spd']
+                    max_spd = max(max_spd, baseline_data['avg_spd']) if pd.notna(max_spd) else baseline_data['avg_spd']
                     y_max_spd = max(100, (int(max_spd) // 20 + 1) * 20)
                     ax2.set_ylim(0, y_max_spd)
                     ax2.legend(loc='lower right')
@@ -250,7 +288,7 @@ else:
                             width = 0.8 / len(selected_spd_dates)
                             colors_spd = ['#c27ba0', '#8e7cc3', '#6fa8dc', '#f6b26b', '#93c47d']
                             
-                            ax2.axhline(y=default_baseline_data['avg_spd'], color='gold', linestyle='-', linewidth=2, label=default_baseline_name)
+                            ax2.axhline(y=default_baseline_data['avg_spd'], color='gold', linestyle='-', linewidth=2, label="Sixes Avg (整場標準)")
                             
                             for i, d_date in enumerate(selected_spd_dates):
                                 d_data = df_spd[df_spd['Date'] == d_date]
@@ -364,7 +402,6 @@ else:
             st.subheader("4️⃣ 爆發力象限圖 (Plotly 互動版)")
             spacer1, col_center, spacer2 = st.columns([1, 4, 1])
             with col_center:
-                # 🌟 將 X 軸數據換成 Sprint Distance
                 x_data = df_plot['Sprint Distance (m)']
                 y_data = df_plot['Top Speed (m/s)']
                 session_avg_sprint = x_data.mean()
@@ -389,17 +426,19 @@ else:
                     fig4.add_vline(x=session_avg_sprint, line_dash="dash", line_color="blue", opacity=0.3)
                     fig4.add_hline(y=session_avg_top, line_dash="dash", line_color="blue", opacity=0.3)
 
+                # 🌟 使用動態基準點 (0.9m 或 3.6m)
                 fig4.add_trace(go.Scatter(
-                    x=[default_baseline_data['sprint_dist']], y=[default_baseline_data['top_spd']], mode='markers',
-                    marker=dict(color='gold', symbol='star', size=18, line=dict(width=1, color='darkgray')), name=default_baseline_name,
-                    hovertemplate=f'<b>{default_baseline_name}</b><br>Sprint Dist: %{{x:.1f}} m<br>Top Speed: %{{y:.1f}} m/s<extra></extra>'
+                    x=[baseline_data['sprint_dist']], y=[baseline_data['top_spd']], mode='markers',
+                    marker=dict(color='gold', symbol='star', size=18, line=dict(width=1, color='darkgray')), name=baseline_label,
+                    hovertemplate=f'<b>{baseline_label}</b><br>Sprint Dist: %{{x:.2f}} m<br>Top Speed: %{{y:.1f}} m/s<extra></extra>'
                 ))
 
-                max_sprint_plot = max(x_data.max() if not x_data.empty else 0, default_baseline_data['sprint_dist'])
-                max_top_plot = max(y_data.max() if not y_data.empty else 0, default_baseline_data['top_spd'])
+                max_sprint_plot = max(x_data.max() if not x_data.empty else 0, baseline_data['sprint_dist'])
+                max_top_plot = max(y_data.max() if not y_data.empty else 0, baseline_data['top_spd'])
                 
-                # 🌟 X軸使用更適合小單位的動態倍率
-                x_max_plot = max(5, (int(max_sprint_plot) // 2 + 1) * 2) 
+                # 🌟 動態天花板：單節模式下 X 軸最低範圍降到 2，整場則為 5
+                x_floor = 2 if is_quarter else 5
+                x_max_plot = max(x_floor, (int(max_sprint_plot) // 2 + 1) * 2) 
                 y_max_plot = max(10, (int(max_top_plot) // 2 + 1) * 2)
 
                 fig4.update_layout(
@@ -468,7 +507,6 @@ else:
                 
                 player_radar = df[(df['Player'] == selected_player) & (df['Session'] == radar_session)].iloc[0]
 
-                # 🌟 雷達圖指標更新為 Sprint Distance
                 categories = ['Total Distance', 'Average Speed', 'Max Speed', 'Sprint Distance']
                 N = len(categories)
                 
@@ -532,15 +570,19 @@ else:
 
                 player_current_bar = df[(df['Player'] == selected_player) & (df['Session'] == player_selected_session)].iloc[0]
                 
+                # 🌟 用來檢查當前檢視事件是否為「單節」，以調整圖表邊界
+                _, is_quarter_target = get_dynamic_baseline(player_selected_session)
+
                 def get_baseline_data(b_name):
                     if b_name == default_baseline_name:
-                        target = default_baseline_data
+                        # 依照教練挑選的檢視事件(Current)，自動決定要派發單節或整場的基準線
+                        target, is_q = get_dynamic_baseline(player_selected_session)
                         return {
                             'Total Distance (m)': target['dist'],
                             'Avg Speed (m/min)': target['avg_spd'],
                             'Top Speed (m/s)': target['top_spd'],
                             'Sprint Distance (m)': target['sprint_dist']
-                        }, "Sixes Avg"
+                        }, "Sixes Avg" + (" (單節)" if is_q else " (整場)")
                     else:
                         past_data = df[(df['Player'] == selected_player) & (df['Session'] == b_name)]
                         if not past_data.empty:
@@ -560,7 +602,6 @@ else:
 
                 fig_b, axes = plt.subplots(1, 4, figsize=(10, 4))
                 
-                # 🌟 長條圖第四項改為 Sprint Distance
                 metrics = [
                     ('Total Distance', 'Total Distance (m)', ['#f4cccc', '#ea9999', '#e06666']),
                     ('Average Speed', 'Avg Speed (m/min)', ['#ead1dc', '#d5a6bd', '#c27ba0']),
@@ -569,7 +610,7 @@ else:
                 ]
                 
                 def format_label(text):
-                    if text == "Sixes Avg": return text
+                    if "Sixes Avg" in text: return text.replace(' ', '\n', 1)
                     return text.replace(' ', '\n', 1)
 
                 for i, (title, col_name, color_palette) in enumerate(metrics):
@@ -577,7 +618,6 @@ else:
                     plot_vals = []
                     plot_colors = []
                     
-                    # 🌟 移除了原本計算 HSD Ratio 的乘 100 邏輯，因為 Sprint 也是直接呈現距離 (m)
                     if b2_data is not None:
                         plot_labels.append(format_label(b2_label))
                         v = b2_data[col_name] if pd.notna(b2_data[col_name]) else 0
@@ -604,7 +644,10 @@ else:
                         max_y = max(plot_vals)
                         if pd.notna(max_y) and max_y >= 0:
                             if 'Total Distance' in title:
-                                axes[i].set_ylim(0, get_dist_ymax(max_y))
+                                if is_quarter_target:
+                                    axes[i].set_ylim(0, max(1000, (int(max_y) // 500 + 1) * 500))
+                                else:
+                                    axes[i].set_ylim(0, get_dist_ymax(max_y))
                             elif 'Average Speed' in title:
                                 y_max = max(100, (int(max_y) // 20 + 1) * 20)
                                 axes[i].set_ylim(0, y_max)
@@ -612,8 +655,9 @@ else:
                                 y_max = max(10, (int(max_y) // 2 + 1) * 2)
                                 axes[i].set_ylim(0, y_max)
                             elif 'Sprint Distance' in title:
-                                # 🌟 為 Sprint Distance 量身打造的小刻度動態邊界
-                                y_max = max(5, (int(max_y) // 5 + 1) * 5)
+                                # 🌟 動態天花板：單節模式下降為 2
+                                y_floor = 2 if is_quarter_target else 5
+                                y_max = max(y_floor, (int(max_y) // 2 + 1) * 2)
                                 axes[i].set_ylim(0, y_max)
                     
                     for bar in bars:
