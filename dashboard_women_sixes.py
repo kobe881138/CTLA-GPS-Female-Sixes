@@ -90,10 +90,10 @@ def load_data(file_path):
         return pd.read_csv(file_path)
     return None
 
-df = load_data('Cleaned_GPS_Data_Women.csv')
+df = load_data('Cleaned_GPS_Data_Women_Sixes.csv')
 
 if df is None:
-    st.error("❌ 找不到資料！請確認 Cleaned_GPS_Data_Women.csv 是否存在。")
+    st.error("❌ 找不到資料！請確認 Cleaned_GPS_Data_Women_Sixes.csv 是否存在。")
 else:
     # 🌟 智慧欄位映射
     rename_mapping = {}
